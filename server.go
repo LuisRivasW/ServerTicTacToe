@@ -65,35 +65,45 @@ func handleWebSocket(conn *websocket.Conn, game *Game) {
 
 		parts := strings.Split(string(message), " ")
 		if parts[0] == "JOIN" && parts[1] == "GAME" {
-			lock.Lock()
-			for id, g := range games {
-				if g.Player2 == nil {
-					game = g
-					gameID, err = strconv.Atoi(id)
-					if err != nil {
-						log.Println("Error al convertir id a entero:", err)
-						continue
-					}
-					game.Player2 = conn
-					currentPlayer = game.Player1
-					break
-				}
-			}
-			if game == nil {
-				gameID = len(games) + 1
-				game = &Game{Player1: conn}
-				games[strconv.Itoa(gameID)] = game
-				currentPlayer = game.Player1
-			}
-			lock.Unlock()
-		} else if len(parts) == 4 && parts[0] == "MOVE" {
-			if conn != currentPlayer {
-				conn.WriteMessage(websocket.TextMessage, []byte("ERROR: No es tu turno!"))
+			gameID, err := strconv.Atoi(parts[2])
+			if err != nil {
+				log.Println("Error al convertir id a entero:", err)
 				continue
 			}
 
-			x, _ := strconv.Atoi(parts[2])
-			y, _ := strconv.Atoi(parts[3])
+			lock.Lock()
+			game, ok := games[strconv.Itoa(gameID)]
+			if !ok || game.Player2 != nil {
+				conn.WriteMessage(websocket.TextMessage, []byte("ERROR: No se puede unir a la sala de juego"))
+				lock.Unlock()
+				continue
+			}
+
+			game.Player2 = conn
+			currentPlayer = game.Player1
+			lock.Unlock()
+		} else if parts[0] == "CREATE" && parts[1] == "GAME" {
+			gameID := parts[2]
+			lock.Lock()
+			_, exists := games[gameID]
+			if exists {
+				conn.WriteMessage(websocket.TextMessage, []byte("ERROR: ID de juego ya existe"))
+				lock.Unlock()
+				continue
+			}
+			game = &Game{Player1: conn}
+			games[gameID] = game
+			currentPlayer = game.Player1
+			conn.WriteMessage(websocket.TextMessage, []byte("GAME CREATED "+gameID))
+			lock.Unlock()
+		} else if len(parts) == 3 && parts[0] == "MOVE" {
+			if game.Player2 == nil {
+				conn.WriteMessage(websocket.TextMessage, []byte("ERROR: El juego aún no tiene dos jugadores"))
+				continue
+			}
+
+			x, _ := strconv.Atoi(parts[1])
+			y, _ := strconv.Atoi(parts[2])
 
 			if x < 0 || x > 2 || y < 0 || y > 2 {
 				conn.WriteMessage(websocket.TextMessage, []byte("ERROR: Movimiento Invalido!"))
@@ -107,32 +117,29 @@ func handleWebSocket(conn *websocket.Conn, game *Game) {
 				continue
 			}
 
-			var currentPlayerStr, loserPlayerStr string
+			var symbol rune
 			if conn == game.Player1 {
 				game.Board[x][y] = 'X'
-				currentPlayerStr = "Player 1"
+				symbol = 'X'
 			} else {
 				game.Board[x][y] = 'O'
-				currentPlayerStr = "Player 2"
+				symbol = 'O'
 			}
 			game.lock.Unlock()
 
 			if checkWinner(game.Board) {
-				fmt.Println("Tenemos un ganador!")
-				if conn == game.Player1 {
-					game.Board[x][y] = 'X'
-					currentPlayerStr = "PLAYER 1"
-					loserPlayerStr = "PLAYER 2"
+				var winner string
+				if symbol == 'X' {
+					winner = "X"
 				} else {
-					game.Board[x][y] = 'O'
-					currentPlayerStr = "PLAYER 2"
-					loserPlayerStr = "PLAYER 1"
+					winner = "O"
 				}
-				winningMessage := fmt.Sprintf("GAME OVER %s, %s HA GANADO", loserPlayerStr, currentPlayerStr)
-				game.Player1.WriteMessage(websocket.TextMessage, []byte(winningMessage))
-				game.Player2.WriteMessage(websocket.TextMessage, []byte(winningMessage))
-				gameOverMessage := "EL JUEGO HA TERMINADO"
-				fmt.Println(gameOverMessage)
+				gameOverMessage := fmt.Sprintf("GAME OVER %s WIN", winner)
+				game.Player1.WriteMessage(websocket.TextMessage, []byte(gameOverMessage))
+				game.Player2.WriteMessage(websocket.TextMessage, []byte(gameOverMessage))
+				return
+			} else if checkDraw(game.Board) {
+				gameOverMessage := "GAME OVER DRAW"
 				game.Player1.WriteMessage(websocket.TextMessage, []byte(gameOverMessage))
 				game.Player2.WriteMessage(websocket.TextMessage, []byte(gameOverMessage))
 				return
@@ -144,8 +151,9 @@ func handleWebSocket(conn *websocket.Conn, game *Game) {
 				currentPlayer = game.Player1
 			}
 
-			game.Player1.WriteMessage(websocket.TextMessage, []byte("UPDATE "+boardToString(game.Board)))
-			game.Player2.WriteMessage(websocket.TextMessage, []byte("UPDATE "+boardToString(game.Board)))
+			moveMessage := fmt.Sprintf("MOVE %s %d %d", string(symbol), x, y)
+			game.Player1.WriteMessage(websocket.TextMessage, []byte(moveMessage))
+			game.Player2.WriteMessage(websocket.TextMessage, []byte(moveMessage))
 		}
 	}
 }
@@ -170,6 +178,17 @@ func checkWinner(board [3][3]rune) bool {
 	}
 
 	return false
+}
+
+func checkDraw(board [3][3]rune) bool {
+	for i := 0; i < 3; i++ {
+		for j := 0; j < 3; j++ {
+			if board[i][j] == 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
